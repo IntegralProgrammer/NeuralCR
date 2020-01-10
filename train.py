@@ -18,14 +18,30 @@ import eval
 import tempfile
 import shutil
 import random
+
+import requests
+from requests import HTTPBasicAuth
+
+LOGGING_WEBDAV_URL = os.environ['LOGGING_WEBDAV_URL']
+LOGGING_WEBDAV_CERTPATH = os.environ['LOGGING_WEBDAV_CERTPATH']
+LOGGING_WEBDAV_APIKEY = os.environ['LOGGING_WEBDAV_APIKEY']
+
 #tf.enable_eager_execution() #For HPF
 
 #Workaround for broken STDOUT/STDERR on HPF
-main_train_log = open("{}/training_log.log".format(os.environ['HOME']), 'w')
+#main_train_log = open("{}/training_log.log".format(os.environ['HOME']), 'w')
+#def print(s):
+#  main_train_log.write(s)
+#  main_train_log.write("\n")
+#  main_train_log.flush()
+debug_info_index = 0
 def print(s):
-  main_train_log.write(s)
-  main_train_log.write("\n")
-  main_train_log.flush()
+	global debug_info_index
+	requests.put(LOGGING_WEBDAV_URL + "/{}.logmsg".format(debug_info_index),
+		verify=LOGGING_WEBDAV_CERTPATH,
+		auth=HTTPBasicAuth('user', LOGGING_WEBDAV_APIKEY),
+		data=str(s))
+	debug_info_index += 1
 
 def save_ont_and_args(ont, args, param_dir):
   #pickle.dump(ont, open(param_dir+'/ont.pickle',"wb" )) -- Stop using Pickles
