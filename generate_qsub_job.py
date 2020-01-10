@@ -7,11 +7,14 @@ def file_printline(f, line):
   f.write(line)
   f.write('\n')
 
-def generate_qsub_job(qsub_path, job_id, training_args):
+def generate_json(qsub_path, job_id, training_args):
   f_json = open("{}/{}.json".format(qsub_path, job_id), 'w')
   file_printline(f_json, training_args.to_json())
   f_json.close()
-  
+  os.chmod("{}/{}.json".format(qsub_path, job_id), int('444', 8)) #Make it executable
+
+
+def generate_script(qsub_path, job_id):
   f_qsub = open("{}/{}.sh".format(qsub_path, job_id), 'w')
   file_printline(f_qsub, "#!/bin/bash")
   
@@ -36,5 +39,8 @@ def generate_qsub_job(qsub_path, job_id, training_args):
   f_qsub.close()
   
   os.chmod("{}/{}.sh".format(qsub_path, job_id), int('744', 8)) #Make it executable
-  os.chmod("{}/{}.json".format(qsub_path, job_id), int('444', 8)) #Make it executable
-  
+
+
+def generate_qsub_job(qsub_path, job_id, training_args):
+  generate_json(qsub_path, job_id, training_args)
+  generate_script(qsub_path, job_id)
