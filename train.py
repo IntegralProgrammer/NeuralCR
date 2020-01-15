@@ -20,11 +20,14 @@ import shutil
 import random
 
 import requests
-from requests import HTTPBasicAuth
+try:
+  from requests import HTTPBasicAuth
+except ImportError:
+  from requests.auth import HTTPBasicAuth
 
 LOGGING_WEBDAV_URL = os.environ['LOGGING_WEBDAV_URL']
-LOGGING_WEBDAV_CERTPATH = os.environ['LOGGING_WEBDAV_CERTPATH']
-LOGGING_WEBDAV_APIKEY = os.environ['LOGGING_WEBDAV_APIKEY']
+WEBDAV_CERTPATH = os.environ['WEBDAV_CERTPATH']
+WEBDAV_APIKEY = os.environ['WEBDAV_APIKEY']
 
 #tf.enable_eager_execution() #For HPF
 
@@ -34,12 +37,13 @@ LOGGING_WEBDAV_APIKEY = os.environ['LOGGING_WEBDAV_APIKEY']
 #  main_train_log.write(s)
 #  main_train_log.write("\n")
 #  main_train_log.flush()
+job_id = None
 debug_info_index = 0
 def print(s):
 	global debug_info_index
-	requests.put(LOGGING_WEBDAV_URL + "/{}.logmsg".format(debug_info_index),
-		verify=LOGGING_WEBDAV_CERTPATH,
-		auth=HTTPBasicAuth('user', LOGGING_WEBDAV_APIKEY),
+	requests.put(LOGGING_WEBDAV_URL + "/{}_{}.logmsg".format(job_id, debug_info_index),
+		verify=WEBDAV_CERTPATH,
+		auth=HTTPBasicAuth('user', WEBDAV_APIKEY),
 		data=str(s))
 	debug_info_index += 1
 
@@ -143,8 +147,8 @@ class MainTrainArgClass:
     self.sentence_val_label_dir = sentence_val_label_dir
     self.snomed2icd = snomed2icd
     self.eval_mimic = eval_mimic
-  
-  def to_json(self):
+
+  def to_dict(self):
     ret = {}
     ret['obofile'] = self.obofile
     ret['oboroot'] = self.oboroot
@@ -170,9 +174,16 @@ class MainTrainArgClass:
     ret['sentence_val_label_dir'] = self.sentence_val_label_dir
     ret['snomed2icd'] = self.snomed2icd
     ret['eval_mimic'] = self.eval_mimic
-    return json.dumps(ret)
+    return ret
+    
+  def to_json(self):
+    return json.dumps(self.to_dict())
 
-def main_train(training_args):
+def main_train(training_args, j_id):
+  #Setup the JOB ID so that print() is directed to the correct WebDAV path
+  global job_id
+  job_id = j_id
+  
   args = MainTrainArgClass(training_args.obofile,
     training_args.oboroot,
     training_args.fasttext,

@@ -37,4 +37,4 @@ for key in training_args_dict.keys():
 
 #Start the training
 training_args = train.MainTrainArgClass(**training_args_dict)
-train.main_train(training_args)
+train.main_train(training_args, JOB_ID)

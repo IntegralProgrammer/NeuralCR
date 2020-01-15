@@ -2,14 +2,23 @@
 import json
 
 from functools import wraps
-from flask import Flask, jsonify, redirect, request, render_template, url_for, abort
+from flask import Flask, jsonify, redirect, request, render_template, url_for, abort, Response
 import os
+import re
 from collections import OrderedDict
 os.chdir(os.path.abspath(os.path.dirname(__file__)))
 
+import requests
+try:
+  from requests import HTTPBasicAuth
+except ImportError:
+  from requests.auth import HTTPBasicAuth
+
+import pycurl
+
 import ncrmodel
 import train
-from generate_qsub_job import generate_qsub_job
+from generate_qsub_job import upload_json_job
 
 CONST_HOMEDIR = os.environ['HOME']
 
@@ -18,6 +27,14 @@ CONST_NEGFILE_FILEPATH = "{}/wikipedia_small.txt" #Relative to $HOME
 CONST_UPLOADED_OBO_DIR = "{}/uploaded_obo" #Relative to $HOME
 CONST_PARAMS_FILEPATH = "{}/trained_model_param" #Relative to $HOME
 CONST_QSUB_FILEPATH = "{}/qsub" #Relative to $HOME
+
+OBO_WEBDAV_URL = os.environ['OBO_WEBDAV_URL']
+LOGGING_WEBDAV_URL = os.environ['LOGGING_WEBDAV_URL']
+COMPLETE_WEBDAV_URL = os.environ['COMPLETE_WEBDAV_URL']
+FAILED_WEBDAV_URL = os.environ['FAILED_WEBDAV_URL']
+OUTPUT_WEBDAV_URL = os.environ['OUTPUT_WEBDAV_URL']
+WEBDAV_CERTPATH = os.environ['WEBDAV_CERTPATH']
+WEBDAV_APIKEY = os.environ['WEBDAV_APIKEY']
 
 app = Flask(__name__)
 
@@ -31,14 +48,58 @@ NCR_MODELS = {}
 
 #For now, to be later fixed...
 NCR_MODELS['HPO'] = {}
-NCR_MODELS['HPO']['object'] = ncrmodel.NCR.loadfromfile('model_params/0', 'model_params/pmc_model_new.bin')
+NCR_MODELS['HPO']['object'] = ('model_params/0', 'model_params/pmc_model_new.bin')
 NCR_MODELS['HPO']['threshold'] = 0.6
 
 NCR_MODELS['MONDO'] = {}
-NCR_MODELS['MONDO']['object'] = ncrmodel.NCR.loadfromfile('model_params/1', 'model_params/pmc_model_new.bin')
+NCR_MODELS['MONDO']['object'] = ('model_params/1', 'model_params/pmc_model_new.bin')
 NCR_MODELS['MONDO']['threshold'] = 0.6 #Just a copy+paste, should have better reasoning for selecting this value
 
-RUNNING_JOB_STATUS = {}
+AVAILABLE_MODEL_ID = []
+def update_ncr_model_list():
+  #Check for complete jobs under /complete in WebDAV
+  complete_req = requests.get(COMPLETE_WEBDAV_URL + "/", verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+  complete_lines = complete_req.text.split('\n')
+  completed_training_jobs = []
+  for cl in complete_lines:
+    if cl.startswith('<li>') and cl.endswith('</li>') and "JOBCOMPLETE_" in cl:
+      matches = re.compile('.+JOBCOMPLETE\_(\d+)').match(cl)
+      if len(matches.groups()) == 0:
+        continue
+      this_model_id = int(matches.group(1))
+      if this_model_id not in AVAILABLE_MODEL_ID:
+        completed_training_jobs.append(this_model_id)
+  
+  print("completed_training_jobs = {}".format(completed_training_jobs))
+  
+  #For each completed job...
+  for cj in completed_training_jobs:
+    #...download the trained model
+    os.mkdir("new_model_params/{}".format(cj))
+    for fname in ["config.json", "ncr_weights.h5", "onto.json"]:
+      with open("new_model_params/{}/{}".format(cj, fname), 'wb') as f:
+        print("Getting new_model_params/{}/{}...".format(cj, fname))
+        c = pycurl.Curl()
+        c.setopt(c.URL, OUTPUT_WEBDAV_URL + "/{}_{}".format(cj, fname))
+        c.setopt(c.WRITEDATA, f)
+        c.setopt(c.CAINFO, WEBDAV_CERTPATH)
+        c.setopt(c.USERPWD, "user:{}".format(WEBDAV_APIKEY))
+        c.perform()
+        c.close()
+    
+    #...construct the NCR() object
+    #...get the given name for this model
+    name_req = requests.get(COMPLETE_WEBDAV_URL + "/JOBCOMPLETE_{}".format(cj), verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+    new_model_name = name_req.text.rstrip()
+    NCR_MODELS[new_model_name] = {}
+    NCR_MODELS[new_model_name]['object'] = ("new_model_params/{}".format(cj), 'model_params/pmc_model_new.bin')
+    NCR_MODELS[new_model_name]['threshold'] = 0.6 #Just a copy+paste, should have better reasoning for selecting this value
+    
+    #Don't re-download
+    AVAILABLE_MODEL_ID.append(cj)
+
+#On startup, load all models from WebDAV
+update_ncr_model_list()
 
 running_job_id = 0
 def generate_job_id():
@@ -82,6 +143,7 @@ def dated_url_for(endpoint, **values):
 
 @app.route('/lsmodels/')
 def ls_models():
+    update_ncr_model_list()
     new_mapping = {}
     for k in NCR_MODELS.keys():
         new_mapping[k] = {}
@@ -122,6 +184,11 @@ def submit_training_job_post():
     ontology_filepath = "{}/{}.obo".format(CONST_UPLOADED_OBO_DIR, j_id)
     ontology_file.save(ontology_filepath.format(CONST_HOMEDIR))
     
+    #Upload this ontology file to WebDAV
+    fdata = open(ontology_filepath.format(CONST_HOMEDIR), 'rb')
+    requests.put(OBO_WEBDAV_URL + "/{}.obo".format(j_id), verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY), data=fdata)
+    fdata.close()
+    
     #Start the training
     print("[JOB: {}] Queue'd training model {}, at root={}...".format(j_id, request.form['name'], request.form['oboroot']))
     params_output_dir = CONST_PARAMS_FILEPATH + "/{}/".format(j_id)
@@ -134,13 +201,57 @@ def submit_training_job_post():
       verbose=True
       )
     
-    generate_qsub_job(CONST_QSUB_FILEPATH.format(CONST_HOMEDIR), j_id, training_proc_args)
-    return jsonify({'status': 'started', 'id': j_id})
+    upload_json_job(j_id, training_proc_args, request.form['name'])
+    return jsonify({'status': 'submitted', 'id': j_id})
 
-#Check the status of a running training job
-@app.route('/check_job_status')
-def check_job_status():
-    pass
+
+@app.route('/log/<int:j_id>')
+def get_job_logs(j_id):
+    #query the WebDAV server
+    jobs_query = requests.get(LOGGING_WEBDAV_URL, verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+    job_lines = jobs_query.text.split('\n')
+    selected_ids = []
+    for jl in job_lines:
+        if jl.startswith('<li>') and jl.endswith('</li>'):
+            matches = re.compile('.+(\d+)\_(\d+)').match(jl)
+            if len(matches.groups()) == 0:
+                continue
+            line_jobid = int(matches.group(1))
+            line_messageid = int(matches.group(2))
+            if line_jobid == j_id:
+                selected_ids.append(line_messageid)
+    selected_ids.sort()
+    
+    #Download all messages
+    saved_messages = ""
+    for message_id in selected_ids:
+      get_url = LOGGING_WEBDAV_URL + "/{}_{}.logmsg".format(j_id, message_id)
+      req = requests.get(get_url, verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+      saved_messages += "{}\n".format(req.text)
+    return Response(saved_messages, mimetype='text/plain')
+
+@app.route('/job/<int:j_id>')
+def get_job_status(j_id):
+    #if j_id is >= running_job_id then j_id is invalid
+    if j_id >= running_job_id:
+        return jsonify({'status': 'invalid'})
+    
+    #query the WebDAV server - is it in the COMPLETE directory
+    complete_query = requests.get(COMPLETE_WEBDAV_URL + "/", verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+    complete_query_lines = complete_query.text.split('\n')
+    for ln in complete_query_lines:
+        if '"JOBCOMPLETE_{}"'.format(j_id) in ln:
+            return jsonify({'status': 'complete'})
+    
+    #query the WebDAV server - is it in the FAILED directory
+    failed_query = requests.get(FAILED_WEBDAV_URL + "/", verify=WEBDAV_CERTPATH, auth=HTTPBasicAuth('user', WEBDAV_APIKEY))
+    failed_query_lines = failed_query.text.split('\n')
+    for ln in failed_query_lines:
+        if '"JOBFAIL_{}"'.format(j_id) in ln:
+            return jsonify({'status': 'failed'})
+    
+    #otherwise, assume the job is submitted (and running/queue'd)
+    return jsonify({'status': 'submitted'})
 
 """
 @api {post} /match/ POST Method
@@ -391,6 +502,7 @@ def annotate_get():
     return jsonify(res)
 
 def match(model, text):
+    model = ncrmodel.NCR.loadfromfile(*model)
     matches = model.get_match([text], 10)[0]
     res = []
     for x in matches:
@@ -402,6 +514,7 @@ def match(model, text):
     return {"matches":res}
 
 def annotate(model, threshold, text):
+    model = ncrmodel.NCR.loadfromfile(*model)
     matches = model.annotate_text(text, threshold)
     #matches = textAnt.process_text(text, 0.6, True)
     res = []
