@@ -8,6 +8,7 @@ from collections import OrderedDict
 os.chdir(os.path.abspath(os.path.dirname(__file__)))
 
 import ncrmodel
+import clinicaltrials_model
 
 app = Flask(__name__)
 
@@ -26,6 +27,10 @@ NCR_MODELS['HPO']['threshold'] = 0.6
 NCR_MODELS['MONDO'] = {}
 NCR_MODELS['MONDO']['object'] = ncrmodel.NCR.loadfromfile('model_params/1', 'model_params/pmc_model_new.bin')
 NCR_MODELS['MONDO']['threshold'] = 0.6 #Just a copy+paste, should have better reasoning for selecting this value
+
+NCR_MODELS['NCTID'] = {}
+NCR_MODELS['NCTID']['object'] = clinicaltrials_model.ClinicalTrialsModel('model_params/lookupTable.json', 'model_params/namesTable.json')
+NCR_MODELS['NCTID']['threshold'] = 0.6
 
 @app.route('/', methods=['POST'])
 def main_page():
